@@ -1,0 +1,713 @@
+# ---------------------------------------------------------------------------------------------------------------------
+# CONFIGURE ENVIRONMENT OF YOUR WORKSTATION WITH THE RELEVANT TOOLBELT
+# ---------------------------------------------------------------------------------------------------------------------
+
+## Linux
+sudo apt install azure-cli
+sudo az aks install-cli
+kubectl version --client
+
+## MacOS
+brew upgrade azure-cli
+sudo az aks install-cli
+kubectl version --client
+
+brew install gh
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# AUTHENTICATE WITH AZURE TO FOCUS RELEVANT TENANCY AND SUBSCRIPTION
+# ---------------------------------------------------------------------------------------------------------------------
+
+## Login and Get Tenant ID for the Resources
+az login
+
+
+# Select the tenant subscription
+az account set --subscription 3cb7d033-6a8a-40b5-b169-2353436f9b64  #WWL
+
+
+TENANTID_AZURERBAC=$(az account show --query tenantId -o tsv)
+TENANTS=$(az rest --method get --url https://management.azure.com/tenants\?api-version\=2020-01-01 --query 'value[].{TenantId:tenantId,Name:displayName}' -o table )
+echo "${TENANTS}" | grep -z ${TENANTID_AZURERBAC}
+
+
+## HACK3
+az account set --subscription 7f798b1d-5b09-491f-82e1-5aed7d81f8c1
+
+## Get Tenant ID for RBAC Tenant Source
+
+TENANTID_AZURERBAC=$(az account show --query tenantId -o tsv)
+echo "${TENANTS}" | grep -z ${TENANTID_AZURERBAC}
+TENANTID_K8SRBAC=$(az account show --query tenantId -o tsv)
+echo "${TENANTS}" | grep ${TENANTID_K8SRBAC}
+
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# ESTABLISH AAD ADMIN AND GROUPS FOR AKS
+# ---------------------------------------------------------------------------------------------------------------------
+
+| Object |	Purpose |
+|---|---|
+| A Cluster Admin User	| Represents at least one break-glass cluster admin user.
+| Two Cluster Admin Security Groups |	Will be mapped to cluster-admin Kubernetes role.
+| Two Cluster Admin Group Membership |	Association between the Cluster Admin User(s) and the two Cluster Admin Security Groups.
+
+
+## create a single admin for both clusters
+# AZ RBAC svc AKS Break Glass Account
+
+TENANTDOMAIN_K8SRBAC=$(az ad signed-in-user show --query 'userPrincipalName' -o tsv | cut -d '@' -f 2 | sed 's/\"//')
+AADOBJECTNAME_USER_CLUSTERADMIN="AZ RBAC svc AKS Break Glass Account"
+AADOBJECTNAME_USER_CLUSTERADMIN_UPN="AZRBACsvcAKSBreakGlassAccount"
+AADOBJECTID_USER_CLUSTERADMIN=$(az ad user create --display-name=${AADOBJECTNAME_USER_CLUSTERADMIN} --user-principal-name ${AADOBJECTNAME_USER_CLUSTERADMIN_UPN}@${TENANTDOMAIN_K8SRBAC} --force-change-password-next-login --password ChangeMeT0S3cr3tS3cur3A5m1n! --query objectId -o tsv)
+
+
+AADOBJECTID_USER_CLUSTERADMIN=$(az ad user show --id ${AADOBJECTNAME_USER_CLUSTERADMIN_UPN}@walwil.com --query objectId -o tsv)
+
+
+
+## create the admin groups
+AADOBJECTNAME_GROUP_CLUSTERADMIN_NE1="AZ RBAC sub p-ne1aks AKS Owner"
+AADOBJECTNAME_GROUP_CLUSTERADMIN_NE1_MAIL="AZRBACsubp-ne1aksAKSOwner"
+AADOBJECTNAME_GROUP_CLUSTERADMIN_WE1="AZ RBAC sub p-we1aks AKS Owner"
+AADOBJECTNAME_GROUP_CLUSTERADMIN_WE1_MAIL="AZRBACsubp-ne1aksAKSOwner"
+
+AADOBJECTID_GROUP_CLUSTERADMIN_NE1=$(az ad group create --display-name $AADOBJECTNAME_GROUP_CLUSTERADMIN_NE1 --mail-nickname $AADOBJECTNAME_GROUP_CLUSTERADMIN_NE1_MAIL --description "Principals in this group are cluster admins in the p-ne1aks AKS cluster." --query objectId -o tsv)
+AADOBJECTID_GROUP_CLUSTERADMIN_WE1=$(az ad group create --display-name $AADOBJECTNAME_GROUP_CLUSTERADMIN_WE1 --mail-nickname $AADOBJECTNAME_GROUP_CLUSTERADMIN_WE1_MAIL --description "Principals in this group are cluster admins in the p-we1aks AKS cluster." --query objectId -o tsv)
+
+## assign the admin as new member in both groups
+az ad group member add -g $AADOBJECTID_GROUP_CLUSTERADMIN_NE1 --member-id $AADOBJECTID_USER_CLUSTERADMIN
+az ad group member add -g $AADOBJECTID_GROUP_CLUSTERADMIN_WE1 --member-id $AADOBJECTID_USER_CLUSTERADMIN
+
+
+AADOBJECTID_GROUP_CLUSTERADMIN_NE1="0f9cb5f6-56f4-4553-b573-ccbe343460bb"
+AADOBJECTID_GROUP_CLUSTERADMIN_WE1="fa8b0b24-8932-4b56-9652-41459f03d30a"
+
+# ---------------------------------------------------------------------------------------------------------------------
+# AUTHENTICATE WITH AZURE TO FOCUS RELEVANT TENANCY AND SUBSCRIPTION
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+
+
+## Azure Log Analytics Workspace	
+#
+# Region: West Europe
+# A Centralized Log Analytics workspace where all the logs are collected
+# Subscription: p-mgt  f6b3f099-986b-4a79-b829-e7a38b86b361
+
+az feature register --namespace "Microsoft.ContainerService" -n "EventgridPreview"
+az feature register --namespace "Microsoft.ContainerService" -n "AKS-ExtensionManager"
+az feature register --namespace "Microsoft.KubernetesConfiguration" -n "fluxConfigurations"
+
+
+az provider register --namespace Microsoft.ContainerService
+az provider register --namespace Microsoft.KubernetesConfiguration
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# PKI
+#
+
+#
+# appgw.pfx = portop.p3.walwil.com
+#
+
+export DOMAIN_NAME_AKS_BASELINE="p3.walwil.com"
+
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -out appgw.crt -keyout appgw.key -subj "/CN=portop.${DOMAIN_NAME_AKS_BASELINE}/O=WalWil PortOp [dummy cert]" -addext "subjectAltName = DNS:portop.${DOMAIN_NAME_AKS_BASELINE}" -addext "keyUsage = digitalSignature" -addext "extendedKeyUsage = serverAuth"
+openssl pkcs12 -export -out appgw.pfx -in appgw.crt -inkey appgw.key -passout pass:
+
+export APP_GATEWAY_LISTENER_CERTIFICATE_AKS_BASELINE=$(cat appgw.pfx | base64 | tr -d '\n')
+
+#
+# traefik-ingress-internal-aks-tls.crt = *.aks-ingress.p3.walwil.com
+#
+
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -out traefik-ingress-internal-aks-ingress-tls.crt -keyout traefik-ingress-internal-aks-ingress-tls.key -subj "/CN=*.aks-ingress.${DOMAIN_NAME_AKS_BASELINE}/O=WalWil AKS Ingress"
+
+export AKS_INGRESS_CONTROLLER_CERTIFICATE_BASE64_AKS_BASELINE=$(cat traefik-ingress-internal-aks-ingress-tls.crt | base64 | tr -d '\n')
+
+
+./saveenv.sh
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# AAD CLUSTER ADMINS
+# 
+
+
+export TENANTID_AZURERBAC_AKS_BASELINE=$(az account show --query tenantId -o tsv)
+export TENANTID_K8SRBAC_AKS_BASELINE=$(az account show --query tenantId -o tsv)
+
+AADOBJECTID_GROUP_CLUSTERADMIN_AKS_BASELINE="fa8b0b24-8932-4b56-9652-41459f03d30a"
+AADOBJECTID_GROUP_A0008_READER_AKS_BASELINE="0f9cb5f6-56f4-4553-b573-ccbe343460bb"
+
+./saveenv.sh
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# HUB AND SPOKE
+# 
+
+
+
+az group create -n p-we1net-net-network -l westeurope
+az group create -n p-we1aks-net -l westeurope
+
+#
+# Regional Hub Deployment
+#
+
+az deployment group create -g p-we1net-net-network -f networking/hub-default.json -p location=westeurope
+
+#
+# Create the spoke that will be home to the AKS cluster and its adjacent resources.
+#
+
+RESOURCEID_VNET_HUB=$(az deployment group show -g p-we1net-net-network -n hub-default --query properties.outputs.hubVnetId.value -o tsv)
+echo $RESOURCEID_VNET_HUB
+az deployment group create -g p-we1aks-net -f networking/spoke-BU0001A0008.json -p location=westeurope hubVnetResourceId="${RESOURCEID_VNET_HUB}"
+
+#
+# Update the shared, regional hub deployment to account for the requirements of the spoke.
+#
+
+RESOURCEID_SUBNET_NODEPOOLS=$(az deployment group show -g p-we1aks-net -n spoke-BU0001A0008 --query properties.outputs.nodepoolSubnetResourceIds.value -o tsv)
+echo $RESOURCEID_SUBNET_NODEPOOLS
+# [This takes about seven minutes to run.]
+az deployment group create -g p-we1net-net-network -f networking/hub-regionA.json -p location=westeurope nodepoolSubnetResourceIds="['${RESOURCEID_SUBNET_NODEPOOLS}']"
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# AKS CLUSTER RESOURCES
+# 
+
+az group create --name p-we1aks-aks --location westeurope
+
+#
+# Container Registry
+#
+
+export RESOURCEID_VNET_CLUSTERSPOKE_AKS_BASELINE=$(az deployment group show -g p-we1aks-net -n spoke-BU0001A0008 --query properties.outputs.clusterVnetResourceId.value -o tsv)
+echo $RESOURCEID_VNET_CLUSTERSPOKE_AKS_BASELINE
+az deployment group create -g p-we1aks-aks -f acr-stamp.json -p targetVnetResourceId=${RESOURCEID_VNET_CLUSTERSPOKE_AKS_BASELINE}
+
+#
+# Import Containers
+#
+
+export ACR_NAME_AKS_BASELINE=$(az deployment group show -g p-we1aks-aks -n acr-stamp --query properties.outputs.containerRegistryName.value -o tsv)
+echo $ACR_NAME_AKS_BASELINE
+
+
+#
+# AddKURED Container Registry
+#
+
+az acr import --source docker.io/weaveworks/kured:1.9.0 -n $ACR_NAME_AKS_BASELINE
+
+# Update the Location in the mainfest
+sed -i "s:docker.io:${ACR_NAME_AKS_BASELINE}.azurecr.io:" ./cluster-manifests/cluster-baseline-settings/kured.yaml
+
+#
+# update the git repo
+#
+
+
+git commit -a -m "Update image source to use my ACR instance instead of a public container registry."
+
+git branch -M main
+git remote add origin https://github.com/DamianFlynn/mspnp-aks-baseline.git
+
+git push -u origin main
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# AKS CLUSTER DEPLOYMENT
+#
+
+az deployment group create -g rg-bu0001a0008 \
+    -f cluster-stamp.json \
+    -p targetVnetResourceId=${RESOURCEID_VNET_CLUSTERSPOKE_AKS_BASELINE} \
+    clusterAdminAadGroupObjectId=${AADOBJECTID_GROUP_CLUSTERADMIN_AKS_BASELINE} \
+    a0008NamespaceReaderAadGroupObjectId=${AADOBJECTID_GROUP_A0008_READER_AKS_BASELINE} \
+    k8sControlPlaneAuthorizationTenantId=${TENANTID_K8SRBAC_AKS_BASELINE} \
+    appGatewayListenerCertificate=${APP_GATEWAY_LISTENER_CERTIFICATE_AKS_BASELINE} \
+    aksIngressControllerCertificate=${AKS_INGRESS_CONTROLLER_CERTIFICATE_BASE64_AKS_BASELINE} \
+    domainName=${DOMAIN_NAME_AKS_BASELINE} \
+    gitOpsBootstrappingRepoHttpsUrl=${GITOPS_REPOURL}
+
+
+
+
+
+az account set --subscription f6b3f099-986b-4a79-b829-e7a38b86b361 #hack3
+az account set --subscription a4f302e4-c2e6-44f5-aedf-902d2cf426fa #walwil
+az provider register -n Microsoft.ContainerService
+az provider register -n Microsoft.Network
+
+az group create --name p-mgt-log --location westeurope
+az deployment group create -g p-mgt-log -f sdd-mgt.json -p location=westeurope 
+WORKSPACE_ID=$(az deployment group show -g p-mgt-log -n sdd-mgt --query properties.outputs.logAnalyticsWorkspaceId.value -o tsv)
+echo $WORKSPACE_ID
+
+
+## Azure Container Registry
+#
+# Region: West Europe and East Europe	
+# Subscription: p-acr [t-tstsp2] 34644b0d-38fc-4af0-b9b8-e5d0a7a3c4ca
+# A single Azure Container Registry instance for those container images shared across multiple clusters
+
+
+az account set --subscription 34644b0d-38fc-4af0-b9b8-e5d0a7a3c4ca #hack3
+az account set --subscription 8c508dc0-fce6-4070-b747-cf287ec07998 #walwil
+az group create --name p-acr --location westeurope
+az deployment group create -g p-acr -f sdd-acr.json -p location=westeurope -p workspaceId=$WORKSPACE_ID -p geoRedundancyLocation=northeurope
+ACR_ID=$(az deployment group show -g p-acr -n sdd-acr --query properties.outputs.containerRegistryId.value -o tsv)
+echo $ACR_ID
+ACR_NAME=$(az deployment group show -g p-acr -n sdd-acr --query properties.outputs.containerRegistryName.value -o tsv)
+echo $ACR_NAME
+
+## Azure Private Dns Zone	
+#
+# Region: West Europe
+# Subscription: p-dns  0ba49036-a228-4464-83b7-299877e261e3
+# The Private Dns Zone for the Azure Container Registry. Later cluster can link their vNets to it
+
+
+az account set --subscription 0ba49036-a228-4464-83b7-299877e261e3 #hack3
+az account set --subscription 48d886f7-1edf-4f9c-a27d-99b5344d0883 #walwil
+az group create --name p-dns --location westeurope
+az deployment group create -g p-dns -f sdd-privatedns.json -p location=westeurope 
+ACR_PRIVATEDNSZONES_ID=$(az deployment group show -g p-dns -n sdd-privatedns --query properties.outputs.acrPrivateDnsZonesId.value -o tsv)
+echo $ACR_PRIVATEDNSZONES_ID
+
+
+
+## Azure Firewall Policy base rules	
+#
+# Region: West Europe
+# Subscription: p-net  bb16521f-10cb-46d4-b6cb-157483d68db8
+# Azure Firewall rules that apply at the entire organization level. These rules are typically cluster agnostic, so they can be shared by them all.
+
+
+az account set --subscription bb16521f-10cb-46d4-b6cb-157483d68db8 #hack3
+az account set --subscription d7903323-d2a1-4d91-8a15-c132300fa411 #walwil
+az group create --name p-net-azfw --location westeurope
+az deployment group create -g p-net-azfw -f sdd-firewall-policies.json -p location=westeurope 
+FW_BASE_POLICY_ID=$(az deployment group show -g p-net-azfw -n sdd-firewall-policies --query properties.outputs.baseFirewallPoliciesId.value -o tsv)
+echo $FW_BASE_POLICY_ID
+
+## Azure Front Door	
+#
+# Region: Global Services
+# Subscription: p-fd [t-tstsp1] 3b0d26a0-99fe-4df1-a695-3cd31ded5a3f
+# Azure Front Door routes traffic to the fastest and available (healthy) backend. Public IP FQDN(s) emitted by the spoke network deployments are being configured in advance as AFD's backends. These regional PIP(s) are later assigned to the Azure Application Gateways Frontend Ip Configuration.
+
+
+az account set --subscription 3b0d26a0-99fe-4df1-a695-3cd31ded5a3f #hack3
+az account set --subscription d33463f2-00ec-416e-b236-082328bd8150 #walwil
+az group create --name p-fd --location westeurope
+az deployment group create -g p-fd -f sdd-frontdoor.json -p location=westeurope 
+FRONTDOOR_NAME=$(az deployment group show -g p-fd -n sdd-frontdoor --query properties.outputs.frontDoorName.value -o tsv)
+echo $FRONTDOOR_NAME
+FRONTDOOR_BACKEND_NAME=$(az deployment group show -g p-fd -n sdd-frontdoor --query properties.outputs.frontDoorBackendPoolName.value -o tsv)
+echo $FRONTDOOR_BACKEND_NAME
+FRONTDOOR_FQDN=$(az deployment group show -g p-fd -n sdd-frontdoor --query properties.outputs.fqdn.value -o tsv)
+echo $FRONTDOOR_FQDN
+
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# HUB AND SPOKES 
+# ---------------------------------------------------------------------------------------------------------------------
+
+## Datacenter WE1 Hub	
+#
+# Region: West Europe
+# Subscription: p-we1net  0a85b8e1-4dac-411d-8683-a79145faed19
+# Azure Front Door routes traffic to the fastest and available (healthy) backend. Public IP FQDN(s) emitted by the spoke network deployments are being configured in advance as AFD's backends. These regional PIP(s) are later assigned to the Azure Application Gateways Frontend Ip Configuration.
+
+az account set --subscription 0a85b8e1-4dac-411d-8683-a79145faed19 #hack3
+az account set --subscription ee964c59-bbb7-4d40-aeb5-78326943be1f #walwil
+az group create --name p-we1net-network --location westeurope
+
+if [ $(az group exists --name NetworkWatcherRG) = false ]; then
+az group create --name NetworkWatcherRG --location westeurope
+fi
+
+az deployment group create -g p-we1net-network -f ssd-hub.json -n p-we1net-network -p workspaceId=$WORKSPACE_ID baseFirewallPoliciesId=$FW_BASE_POLICY_ID firewallPolicyLocation=westeurope location=westeurope hubVnetAddressSpace="10.182.0.0/22" azureFirewallSubnetAddressSpace="10.182.1.0/24" azureGatewaySubnetAddressSpace="10.182.0.0/24" azureBastionSubnetAddressSpace="10.182.3.0/24"  hubid="we1"
+
+
+HUB_VNET_WE1=$(az deployment group show -g p-we1net-network -n p-we1net-network --query properties.outputs.hubVnetId.value -o tsv)
+echo $HUB_VNET_WE1
+HUB_FW_WE1=$(az deployment group show -g p-we1net-network -n p-we1net-network --query properties.outputs.hubFwId.value -o tsv)
+echo $HUB_FW_WE1
+HUB_STORAGE_WE1=$(az deployment group show -g p-we1net-network -n p-we1net-network --query properties.outputs.storageAccountId.value -o tsv)
+echo $HUB_STORAGE_WE1
+
+
+## Datacenter WE1 AKS Spoke
+#
+# Region: West Europe
+# Subscription: p-we1aks [p-we1rmt] b4e6ba46-404a-408e-a3f3-475b5f0f482d
+# Azure Front Door routes traffic to the fastest and available (healthy) backend. Public IP FQDN(s) emitted by the spoke network deployments are being configured in advance as AFD's backends. These regional PIP(s) are later assigned to the Azure Application Gateways Frontend Ip Configuration.
+
+az account set --subscription b4e6ba46-404a-408e-a3f3-475b5f0f482d #hack3
+az account set --subscription e6d0946f-748b-4a80-a389-3655d76e5d58 #walwil
+az group create --name p-we1aks-net --location westeurope
+
+if [ $(az group exists --name NetworkWatcherRG) = false ]; then
+az group create --name NetworkWatcherRG --location westeurope
+fi
+
+
+az deployment group create -g p-we1aks-net -f ssd-aksspoke-net.json -n p-we1aks-net -p workspaceId=$WORKSPACE_ID hubVnetResourceId="${HUB_VNET_WE1}" hubFwId="${HUB_FW_WE1}" hubStorageId="${HUB_STORAGE_WE1}" location="westeurope" clusterVNetAddressPrefix="10.182.16.0/22" clusterNodesSubnetAddressPrefix="10.182.16.0/23" clusterIngressServicesSubnetAdressPrefix="10.182.18.0/24" applicationGatewaySubnetAddressPrefix="10.182.19.0/24"
+AKS_NODEPOOL_SUBNET_WE1=$(az deployment group show -g  p-we1aks-net  -n p-we1aks-net --query properties.outputs.nodepoolSubnetResourceIds.value -o tsv)
+echo $AKS_NODEPOOL_SUBNET_WE1
+AKS_APPGW_PIP_WE1=$(az deployment group show -g  p-we1aks-net  -n p-we1aks-net  --query properties.outputs.appGatewayPublicIp.value -o tsv)
+echo $AKS_APPGW_PIP_WE1
+APPGW_SUBDOMAIN_WE1=$(az deployment group show -g  p-we1aks-net  -n p-we1aks-net --query properties.outputs.subdomainName.value -o tsv)
+echo $APPGW_SUBDOMAIN_WE1
+AKS_VNET_WE1=$(az deployment group show -g p-we1aks-net  -n p-we1aks-net --query properties.outputs.clusterVnetResourceId.value -o tsv)
+echo $AKS_VNET_WE1
+
+## Datacenter NE1 Hub
+#
+# Region: North Europe
+# Subscription: p-ne1net 038a70b3-d3aa-4cae-a805-bbd85aec7fbc
+# Azure Front Door routes traffic to the fastest and available (healthy) backend. Public IP FQDN(s) emitted by the spoke network deployments are being configured in advance as AFD's backends. These regional PIP(s) are later assigned to the Azure Application Gateways Frontend Ip Configuration.
+
+az account set --subscription 038a70b3-d3aa-4cae-a805-bbd85aec7fbc #hack3
+az account set --subscription 7df1b023-784c-495f-bef1-83139b447d53 #walwil
+az group create --name p-ne1net-network --location northeurope
+
+if [ $(az group exists --name NetworkWatcherRG) = false ]; then
+az group create --name NetworkWatcherRG --location northeurope
+fi
+
+az deployment group create -g p-ne1net-network -f ssd-hub.json -n p-ne1net-network -p workspaceId=$WORKSPACE_ID baseFirewallPoliciesId=$FW_BASE_POLICY_ID firewallPolicyLocation=westeurope location=northeurope hubVnetAddressSpace="10.183.0.0/22" azureFirewallSubnetAddressSpace="10.183.1.0/24" azureGatewaySubnetAddressSpace="10.183.0.0/24" azureBastionSubnetAddressSpace="10.183.3.0/24" hubid="ne1"
+HUB_VNET_NE1=$(az deployment group show -g p-ne1net-network -n p-ne1net-network --query properties.outputs.hubVnetId.value -o tsv)
+echo $HUB_VNET_NE1
+HUB_FW_NE1=$(az deployment group show -g p-ne1net-network -n p-ne1net-network --query properties.outputs.hubFwId.value -o tsv)
+echo $HUB_FW_NE1
+HUB_STORAGE_NE1=$(az deployment group show -g p-ne1net-network -n p-ne1net-network --query properties.outputs.storageAccountId.value -o tsv)
+echo $HUB_STORAGE_NE1
+
+
+
+## Datacenter NE1 AKS Spoke
+#
+# Region: North Europe
+# Subscription: p-ne1aks [t-img] b23237e9-5a5c-4b8d-9459-649e1f2a086b
+# Azure Front Door routes traffic to the fastest and available (healthy) backend. Public IP FQDN(s) emitted by the spoke network deployments are being configured in advance as AFD's backends. These regional PIP(s) are later assigned to the Azure Application Gateways Frontend Ip Configuration.
+
+az account set --subscription b23237e9-5a5c-4b8d-9459-649e1f2a086b #hack3
+az account set --subscription dc02a191-7579-474f-994c-bb4494dbb80d #walwil
+az group create --name p-ne1aks-net --location northeurope
+
+if [ $(az group exists --name NetworkWatcherRG) = false ]; then
+az group create --name NetworkWatcherRG --location northeurope
+fi
+
+az deployment group create -g p-ne1aks-net -f ssd-aksspoke-net.json -n p-ne1aks-net -p workspaceId=$WORKSPACE_ID hubVnetResourceId="${HUB_VNET_NE1}" hubFwId="${HUB_FW_NE1}" hubStorageId="${HUB_STORAGE_NE1}" location="northeurope" clusterVNetAddressPrefix="10.183.16.0/22" clusterNodesSubnetAddressPrefix="10.183.16.0/23" clusterIngressServicesSubnetAdressPrefix="10.183.18.0/24" applicationGatewaySubnetAddressPrefix="10.183.19.0/24"
+AKS_NODEPOOL_SUBNET_NE1=$(az deployment group show -g  p-ne1aks-net  -n p-ne1aks-net --query properties.outputs.nodepoolSubnetResourceIds.value -o tsv)
+echo $AKS_NODEPOOL_SUBNET_NE1
+AKS_APPGW_PIP_NE1=$(az deployment group show -g  p-ne1aks-net  -n p-ne1aks-net  --query properties.outputs.appGatewayPublicIp.value -o tsv)
+echo $AKS_APPGW_PIP_NE1
+APPGW_SUBDOMAIN_NE1=$(az deployment group show -g  p-ne1aks-net  -n p-ne1aks-net --query properties.outputs.subdomainName.value -o tsv)
+echo $APPGW_SUBDOMAIN_NE1
+AKS_VNET_NE1=$(az deployment group show -g p-ne1aks-net  -n p-ne1aks-net --query properties.outputs.clusterVnetResourceId.value -o tsv)
+echo $AKS_VNET_NE1
+
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# CERTIFICATES 
+# ---------------------------------------------------------------------------------------------------------------------
+
+## APP GATEWAY 
+
+### Local Issue
+
+export DOMAIN_NAME_AKS_BASELINE="walwil.com"
+
+# Create the certificate that will be presented to web clients by Azure Application Gateway for your domain.
+
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -out appgw.crt -keyout appgw.key -subj "/CN=*.aks-ingress.${DOMAIN_NAME_AKS_BASELINE}/O=${DOMAIN_NAME_AKS_BASELINE} AKS Ingress" -addext "subjectAltName = DNS:*.aks-ingress.${DOMAIN_NAME_AKS_BASELINE}" -addext "keyUsage = digitalSignature" -addext "extendedKeyUsage = serverAuth"
+openssl pkcs12 -export -out appgw.pfx -in appgw.crt -inkey appgw.key -passout pass:
+
+# Base64 encode the client-facing certificate
+
+export APP_GATEWAY_LISTENER_CERTIFICATE_AKS_BASELINE=$(cat appgw.pfx | base64 | tr -d '\n')
+echo $APP_GATEWAY_LISTENER_CERTIFICATE_AKS_BASELINE
+
+### Lets Encrypt Issuer
+
+# call the Let's Encrypt certificate generation script for both PIPs' FQDNs
+# [Generating the certificates takes about twenty minutes to run.]
+chmod +x ./certs/letsencrypt-pip-cert-generation.sh ./certs/authenticator.sh
+
+## Datacenter WE1 AKS Spoke
+az account set --subscription b4e6ba46-404a-408e-a3f3-475b5f0f482d #hack3
+az account set --subscription e6d0946f-748b-4a80-a389-3655d76e5d58 #walwil
+./certs/letsencrypt-pip-cert-generation.sh $AKS_APPGW_PIP_WE1
+APP_GATEWAY_LISTENER_WE1_CERTIFICATE_BASE64=$(cat ${APPGW_SUBDOMAIN_WE1}.pfx | base64 | tr -d '\n')
+echo $APP_GATEWAY_LISTENER_WE1_CERTIFICATE_BASE64
+
+## Datacenter NE1 AKS Spoke
+az account set --subscription b23237e9-5a5c-4b8d-9459-649e1f2a086b #hack3
+az account set --subscription dc02a191-7579-474f-994c-bb4494dbb80d #walwil
+./certs/letsencrypt-pip-cert-generation.sh $AKS_APPGW_PIP_NE1
+APP_GATEWAY_LISTENER_NE1_CERTIFICATE_BASE64=$(cat ${APPGW_SUBDOMAIN_NE1}.pfx | base64 | tr -d '\n')
+echo $APP_GATEWAY_LISTENER_NE1_CERTIFICATE_BASE64
+
+
+## AKS INGRESS
+
+# Generate the wildcard certificate for the AKS Ingress Controller
+
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -out traefik-ingress-internal-aks-ingress-tls.crt -keyout traefik-ingress-internal-aks-ingress-tls.key -subj "/CN=*.aks-ingress.${DOMAIN_NAME_AKS_BASELINE}/O=AKS Ingress"
+
+# Combined as PEM structure (required by Azure Application Gateway for backend pools)
+
+cat traefik-ingress-internal-aks-ingress-tls.crt traefik-ingress-internal-aks-ingress-tls.key > traefik-ingress-internal-aks-ingress-tls.pem
+
+
+# Base64 encode the AKS Ingress Controller certificate
+
+export AKS_INGRESS_CONTROLLER_CERTIFICATE_BASE64_AKS_BASELINE=$(cat traefik-ingress-internal-aks-ingress-tls.crt | base64 | tr -d '\n')
+echo $AKS_INGRESS_CONTROLLER_CERTIFICATE_BASE64_AKS_BASELINE
+
+# ---------------------------------------------------------------------------------------------------------------------
+# AKS 
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+# This workflow will deploy two clusters, one in each region, without the workload.
+#
+# Follow the next steps to use this workflow:
+#
+# 1. Ensure you have followed the prior sections before deploying this AKS cluster. This way, you will be capable of setting:
+#    - the secrets values
+#        - AZURE_CREDENTIALS                         The Azure Service Principal that will deploy the AKS cluster in your Azure subscription. For more information please take a look at https://github.com/Azure/login#configure-deployment-credentials
+#        - APP_GATEWAY_LISTENER_WE1_CERTIFICATE_BASE64   The certificate data for app gateway TLS termination. It is base64. Ideally fetch this secret from a platform-managed secret store such as Azure KeyVault: https://github.com/marketplace/actions/azure-key-vault-get-secrets
+#        - APP_GATEWAY_LISTENER_NE1_CERTIFICATE_BASE64   The certificate data for app gateway TLS termination. It is base64. Ideally fetch this secret from a platform-managed secret store such as Azure KeyVault: https://github.com/marketplace/actions/azure-key-vault-get-secrets
+#        - AKS_INGRESS_CONTROLLER_CERTIFICATE_BASE64 The base 64 encoded AKS Ingress Controller public certificate (as .crt or .cer) to be stored in Azure Key Vault as secret and referenced by Azure Application Gateway as a trusted root certificate.
+#    - the cluster parameter
+#        -  azuredeploy.parameters.region1.json
+#        -  azuredeploy.parameters.region2.json
+#
+# Take into account the DEPLOY_REGION1 and DEPLOY_REGION2 env variables. If we want to add a new region, the ideal situation is not deploy the already working clusters. Adding a value different of true will skip the specific region steps.
+# Changing the cluster stamp file is expected to be applied on all the regions
+
+## Azure Container Registry
+
+az account set --subscription 34644b0d-38fc-4af0-b9b8-e5d0a7a3c4ca #hack3
+az account set --subscription 8c508dc0-fce6-4070-b747-cf287ec07998 #walwil
+
+az acr import --source docker.io/library/memcached:1.5.20 -n $ACR_NAME --force
+az acr import --source docker.io/fluxcd/flux:1.21.1 -n $ACR_NAME --force
+az acr import --source docker.io/weaveworks/kured:1.6.1 -n $ACR_NAME --force
+az acr import --source docker.io/library/traefik:v2.5.3 -n $ACR_NAME --force
+
+## Datacenter WE1 AKS Spoke
+#
+# Region: West Europe
+
+az account set --subscription b4e6ba46-404a-408e-a3f3-475b5f0f482d #hack3
+az account set --subscription e6d0946f-748b-4a80-a389-3655d76e5d58 #walwil
+
+az group create --name p-we1aks-aks --location westeurope
+az deployment group create --resource-group p-we1aks-aks \
+    --template-file "ssd-aksspoke-aks.json" \
+    --parameters \
+        location="westeurope" \
+        targetVnetResourceId="$AKS_VNET_WE1" \
+        appIdentifier="demo" \
+        envId="we1" \
+        clusterAdminAadGroupObjectId="$AADOBJECTID_GROUP_CLUSTERADMIN_WE1" \
+        k8sControlPlaneAuthorizationTenantId="$TENANTID_K8SRBAC" \
+        clusterInternalLoadBalancerIpAddress="10.243.4.4" \
+        logAnalyticsWorkspaceId="$WORKSPACE_ID" \
+        domainName="$DOMAIN_NAME_AKS_BASELINE" \
+        publicIpId="$AKS_APPGW_PIP_WE1" \
+        containerRegistryId="$ACR_ID" \
+        acrPrivateDnsZonesId="$ACR_PRIVATEDNSZONES_ID" \
+        appGatewayListenerCertificate=$APP_GATEWAY_LISTENER_WE1_CERTIFICATE_BASE64 \
+        aksIngressControllerCertificate=$AKS_INGRESS_CONTROLLER_CERTIFICATE_BASE64_AKS_BASELINE
+
+
+  
+Published the web application to the sandbox, domain names needs to be white labeld,
+SSL Certificaits for outside world 
+need to hand over a test environment for testing Purpose
+
+export WE1_CLUSTER_ID=$(az deployment group show --resource-group p-we1aks-aks -n ssd-aksspoke-aks --query properties.outputs.aksClusterName.value -o tsv)
+echo $WE1_CLUSTER_ID
+
+    # Bake using Kubernetes Kustomize - Region 1
+    # NOTE: you could consider using fluxctl action instead. That could help on deploying Flux from a single step instead of baking and then deploying as demonstrated in here.
+    - name: Bake manifest - Region 1
+      id: aks-kustomize-region1
+      if: success() && env.DEPLOY_REGION1 == 'true'
+      uses: azure/k8s-bake@v1
+      with:
+        renderEngine: 'kustomize'
+        kustomizationPath: 'cluster-manifests/region1/bootstrapping'
+        kubectl-version: 'latest'
+
+    # Create the cluster-baseline-settings namespace and deploy Flux into it - Region 1
+    - name: Create the cluster-baseline-settings namespace and deploy Flux - Region 1
+      id: aks-deploy-region1
+      if: success() && env.DEPLOY_REGION1 == 'true'
+      uses: Azure/k8s-deploy@v1
+      with:
+        namespace: 'cluster-baseline-settings'
+        manifests: |
+          cluster-manifests/base/cluster-baseline-settings/ns.yaml
+          ${{ steps.aks-kustomize-region1.outputs.manifestsBundle }}
+
+    - name: Azure CLI - Enroll Azure Application Gateway as backend in Azure Front Door - Region 1 
+      id: enrol-cluster-1
+      if: success() && env.DEPLOY_REGION1 == 'true'
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az extension add --upgrade -n front-door
+          APPGW_FQDN_BU0001A0042_03=$(az deployment group show -g rg-enterprise-networking-spokes -n spoke-BU0001A0042-03 --query properties.outputs.appGwFqdn.value -o tsv)
+          FRONT_DOOR_NAME=$(az deployment group show -g rg-bu0001a0042-shared -n shared-svcs-stamp --query properties.outputs.frontDoorName.value -o tsv)
+          FRONT_DOOR_BACKENDPOOL_NAME=$(az deployment group show -g rg-bu0001a0042-shared -n shared-svcs-stamp --query properties.outputs.frontDoorBackendPoolName.value -o tsv)
+          az network front-door backend-pool backend add --address $APPGW_FQDN_BU0001A0042_03 --front-door-name $FRONT_DOOR_NAME --pool-name $FRONT_DOOR_BACKENDPOOL_NAME -g rg-bu0001a0042-shared --backend-host-header $APPGW_FQDN_BU0001A0042_03 --disabled false --http-port 80 --https-port 443  --priority 1 --weight 50
+
+    # -----------------------REGION2------------------------------------------------
+    # Deploy the cluster into your environment, assuming all prerequisites are up and running.
+
+
+
+
+## Datacenter NE1 AKS Spoke
+#
+# Region: West Europe
+
+az account set --subscription b23237e9-5a5c-4b8d-9459-649e1f2a086b #hack3
+az account set --subscription dc02a191-7579-474f-994c-bb4494dbb80d #walwil
+
+az group create --name p-ne1aks-aks --location northeurope
+az deployment group create --resource-group p-ne1aks-aks \
+    --template-file "ssd-aksspoke-aks.json" \
+    --parameters \
+        location="northeurope" \
+        targetVnetResourceId="$AKS_VNET_NE1" \
+        appIdentifier="demo" \
+        clusterAdminAadGroupObjectId="$AADOBJECTID_GROUP_CLUSTERADMIN_NE1" \
+        k8sControlPlaneAuthorizationTenantId="$TENANTID_K8SRBAC" \
+        clusterInternalLoadBalancerIpAddress="10.243.4.4" \
+        logAnalyticsWorkspaceId="$WORKSPACE_ID" \
+        domainName="$DOMAIN_NAME_AKS_BASELINE" \
+        publicIpId="$AKS_APPGW_PIP_NE1" \
+        containerRegistryId="$ACR_ID" \
+        acrPrivateDnsZonesId="$ACR_PRIVATEDNSZONES_ID" \
+        appGatewayListenerCertificate=$APP_GATEWAY_LISTENER_NE1_CERTIFICATE_BASE64 \
+        aksIngressControllerCertificate=$AKS_INGRESS_CONTROLLER_CERTIFICATE_BASE64_AKS_BASELINE
+
+export NE1_CLUSTER_ID=$(az deployment group show --resource-group p-ne1aks-aks -n ssd-aksspoke-aks --query properties.outputs.aksClusterName.value -o tsv)
+echo $WE1_CLUSTER_ID
+
+
+
+    # Set the AKS cluster context - Region 2
+    - name: Set the AKS cluster context - Region 2
+      uses: Azure/aks-set-context@v1
+      if: success() && env.DEPLOY_REGION2 == 'true'
+      with:
+        creds: '${{ secrets.AZURE_CREDENTIALS }}'
+        cluster-name: ${{ steps.aks-cluster-region2.outputs.name }}
+        resource-group: p-ne1aks-aks
+
+    # Bake using Kubernetes Kustomize - Region 2
+    # NOTE: you could consider using fluxctl action instead. That could help on deploying Flux from a single step instead of baking and then deploying as demonstrated in here.
+    - name: Bake manifest - Region 2
+      id: aks-kustomize-region2
+      uses: azure/k8s-bake@v1
+      if: success() && env.DEPLOY_REGION2 == 'true'
+      with:
+        renderEngine: 'kustomize'
+        kustomizationPath: 'cluster-manifests/region2/bootstrapping'
+        kubectl-version: 'latest'
+
+    # Create the cluster-baseline-settings namespace and deploy Flux into it - Region 2
+    - name: Create the cluster-baseline-settings namespace and deploy Flux - Region 2
+      id: aks-deploy-region2
+      if: success() && env.DEPLOY_REGION2 == 'true'
+      uses: Azure/k8s-deploy@v1
+      with:
+        namespace: 'cluster-baseline-settings'
+        manifests: |
+          cluster-manifests/base/cluster-baseline-settings/ns.yaml
+          ${{ steps.aks-kustomize-region2.outputs.manifestsBundle }}
+
+    - name: Azure CLI - Enroll Azure Application Gateway as backend in Azure Front Door - Region 2
+      id: enrol-cluster-2
+      if: success() && env.DEPLOY_REGION2 == 'true'
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az extension add --upgrade -n front-door
+          APPGW_FQDN_BU0001A0042_04=$(az deployment group show -g rg-enterprise-networking-spokes -n spoke-BU0001A0042-04 --query properties.outputs.appGwFqdn.value -o tsv)
+          FRONT_DOOR_NAME=$(az deployment group show -g rg-bu0001a0042-shared -n shared-svcs-stamp --query properties.outputs.frontDoorName.value -o tsv)
+          FRONT_DOOR_BACKENDPOOL_NAME=$(az deployment group show -g rg-bu0001a0042-shared -n shared-svcs-stamp --query properties.outputs.frontDoorBackendPoolName.value -o tsv)
+          az network front-door backend-pool backend add --address $APPGW_FQDN_BU0001A0042_04 --front-door-name $FRONT_DOOR_NAME --pool-name $FRONT_DOOR_BACKENDPOOL_NAME -g rg-bu0001a0042-shared --backend-host-header $APPGW_FQDN_BU0001A0042_04 --disabled false --http-port 80 --https-port 443  --priority 1 --weight 50
+         
+        azcliversion: 2.17.1
+
+
+# Operations
+
+## Build Node/Jump Box
+
+sudo apt install azure-cli
+az login
+
+
+
+## Container Registry
+az account set --subscription 8c508dc0-fce6-4070-b747-cf287ec07998 #walwil
+az acr list --resource-group p-acr
+az acr repository list --name walwil
+
+
+### KubeCTL
+
+az account set --subscription b4e6ba46-404a-408e-a3f3-475b5f0f482d #hack3
+az account set --subscription e6d0946f-748b-4a80-a389-3655d76e5d58 #walwil
+
+az aks get-credentials --resource-group "p-we1aks-aks" --name p-we1aks-zxrbk5dl3nlqg
+
+
+#List our currently available contexts
+kubectl config get-contexts
+
+
+#set our current context to the Azure context
+kubectl config use-context p-we1aks-zxrbk5dl3nlqg
+
+#run a command to communicate with our cluster.
+kubectl get nodes
+
+#Get a list of running pods, we'll look at the system pods since we don't have anything running.
+#Since the API Server is HTTP based...we can operate our cluster over the internet...esentially the same as if it was local using kubectl.
+kubectl get pods --all-namespaces
+
+## Azure Container Registry
+
+az account set --subscription 34644b0d-38fc-4af0-b9b8-e5d0a7a3c4ca #hack3
+az account set --subscription 8c508dc0-fce6-4070-b747-cf287ec07998 #walwil
+
+az acr import --source docker.io/library/memcached:1.5.20 -n $ACR_NAME --force
+az acr import --source docker.io/fluxcd/flux:1.21.1 -n $ACR_NAME --force
+az acr import --source docker.io/weaveworks/kured:1.6.1 -n $ACR_NAME --force
+az acr import --source docker.io/library/traefik:v2.5.3 -n $ACR_NAME --force
