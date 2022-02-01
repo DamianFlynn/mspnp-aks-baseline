@@ -2,11 +2,11 @@ kind: NetworkPolicy
 apiVersion: networking.k8s.io/v1
 metadata:
   name: allow-only-ingress-to-workload
-  namespace: a0008
+  namespace: portop
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: aspnetapp
+      app.kubernetes.io/name: portop-cargo-detail
   ingress:
   - from:
     - namespaceSelector: {}
